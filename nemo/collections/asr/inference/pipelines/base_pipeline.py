@@ -942,6 +942,8 @@ class BasePipeline(PipelineInterface):
                         "translation_segments": [],
                         "asr_segments": [],
                     }
+                    if self.nmt_enabled:
+                        pipeline_output[stream_id]["final_translation_segments"] = []
 
                 accumulated_text = pipeline_output[stream_id]["text"]
                 accumulated_translation = pipeline_output[stream_id]["translation"]
@@ -972,6 +974,8 @@ class BasePipeline(PipelineInterface):
                     step_translation = step_output.current_step_translation
                     delay = request_generator.get_elapsed_duration(stream_id)
                     pipeline_output[stream_id]["translation_segments"].append((step_translation, delay))
+                    if final_translation:
+                        pipeline_output[stream_id]["final_translation_segments"].append((final_translation, delay))
 
         self.close_session()
         return pipeline_output

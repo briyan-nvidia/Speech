@@ -175,6 +175,16 @@ def dump_output(
                 "pred_translation": translation,
                 "json_filepath": json_filepath,
             }
+            for key in (
+                "final_translation_segments",
+                "speech_filepath",
+                "tts_segments",
+                "tts_sample_rate",
+                "tts_audio_duration_seconds",
+                "tts_generation_time_seconds",
+            ):
+                if key in data:
+                    item[key] = data[key]
 
             # Copy extra fields from manifest
             if manifest_index is not None:

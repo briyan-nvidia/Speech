@@ -44,6 +44,8 @@ Note:
 """
 
 
+from pathlib import Path
+
 import hydra
 
 from nemo.collections.asr.inference.factory.pipeline_builder import PipelineBuilder
@@ -68,6 +70,52 @@ except ImportError:
     # NB: nemo_text_processing requires pynini, which is tricky to install on MacOS
     # since nemo_text_processing is not necessary for ASR, wrap the import
     logging.warning("NeMo text processing library is unavailable.")
+
+
+def synthesize_pipeline_output(output: dict, cfg) -> dict:
+    """Add MagpieTTS audio artifacts to an existing streaming translation output."""
+    if not cfg.enable_nmt:
+        raise ValueError("enable_tts requires enable_nmt=true")
+
+    from nemo.collections.tts.inference import (
+        MagpieTTSBackend,
+        MagpieTTSConfig,
+        resolve_language,
+        synthesize_finalized_translations,
+    )
+
+    tts_cfg = cfg.tts
+    backend = MagpieTTSBackend(
+        MagpieTTSConfig(
+            model=tts_cfg.model,
+            revision=tts_cfg.revision,
+            model_filename=tts_cfg.model_filename,
+            device=tts_cfg.device,
+            speaker=tts_cfg.speaker,
+            use_cfg=tts_cfg.use_cfg,
+            cfg_scale=tts_cfg.cfg_scale,
+            apply_text_normalization=tts_cfg.apply_text_normalization,
+            seed=tts_cfg.seed,
+        )
+    )
+    language = resolve_language(tts_cfg.language, cfg.nmt.target_language)
+    output_dir = tts_cfg.output_dir or str(Path(cfg.output_filename).resolve().parent / "tts_audio")
+    output = synthesize_finalized_translations(
+        output,
+        backend,
+        output_dir,
+        language,
+        inter_segment_silence_ms=tts_cfg.inter_segment_silence_ms,
+    )
+    total_audio = sum(item["tts_audio_duration_seconds"] for item in output.values())
+    total_generation = sum(item["tts_generation_time_seconds"] for item in output.values())
+    logging.info(
+        "TTS generated %.2fs of audio in %.2fs (RTF %.3f)",
+        total_audio,
+        total_generation,
+        total_generation / total_audio if total_audio else float("inf"),
+    )
+    return output
 
 
 @hydra.main(version_base=None)
@@ -117,6 +165,11 @@ def main(cfg):
     exec_dur = sum(measurements) / len(measurements)
     rtfx = data_dur / exec_dur if exec_dur > 0 else float('inf')
     logging.info(f"RTFx: {rtfx:.2f} ({data_dur:.2f}s / {exec_dur:.2f}s)")
+
+    # Synthesize only translations finalized by the MT policy. This is intentionally
+    # outside the ASR/MT timer so speech generation can be measured independently.
+    if cfg.get("enable_tts", False):
+        output = synthesize_pipeline_output(output, cfg)
 
     # Calculate ASR LAAL
     asr_laal = calculate_asr_laal(output, durations, manifest, cfg)

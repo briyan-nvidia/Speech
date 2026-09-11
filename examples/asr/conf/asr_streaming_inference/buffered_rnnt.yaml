@@ -93,6 +93,24 @@ nmt:
     seed: 42                                         # The seed to initialize the random number generator for sampling
 
 
+# ================================
+# Text-to-Speech Configuration
+# ================================
+tts:
+  model: nvidia/magpie_tts_multilingual_357m
+  revision: v2607
+  model_filename: magpie_tts_multilingual_357m.nemo
+  device: cuda:0
+  language: null                              # Target language code; inferred from nmt.target_language when null
+  speaker: Sofia
+  use_cfg: true
+  cfg_scale: 2.5
+  apply_text_normalization: true
+  seed: 42
+  inter_segment_silence_ms: 0
+  output_dir: null                            # Defaults to <output manifest directory>/tts_audio
+
+
 # ========================
 # Confidence estimation
 # ========================
@@ -147,6 +165,7 @@ output_filename: null                         # Path to output transcription JSO
 output_dir: null                              # Directory to save time-aligned output
 enable_itn: false                             # Whether to apply inverse text normalization
 enable_nmt: false                             # Whether to apply neural machine translation
+enable_tts: false                             # Synthesize finalized translations with MagpieTTS
 asr_output_granularity: segment               # Output granularity: word or segment
 cache_dir: null                               # Directory to store cache (e.g., .far files)
 lang: null                                    # Language code for ASR model

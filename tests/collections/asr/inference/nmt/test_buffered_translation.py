@@ -81,6 +81,36 @@ class _NativePipeline(_Pipeline):
             state.current_step_transcript = "unfinished ending"
 
 
+class _RequestGenerator:
+    def set_audio_filepaths(self, audio_filepaths, options):
+        self.audio_filepaths = audio_filepaths
+
+    def set_progress_bar(self, progress_bar):
+        pass
+
+    def get_audio_filepath(self, stream_id):
+        return self.audio_filepaths[stream_id]
+
+    def get_elapsed_duration(self, stream_id):
+        return 1.5
+
+    def __iter__(self):
+        yield [object()]
+
+
+class _RunPipeline(_Pipeline):
+    def __init__(self, outputs):
+        super().__init__(_Translator())
+        self.outputs = outputs
+        self.request_generator = _RequestGenerator()
+
+    def get_request_generator(self):
+        return self.request_generator
+
+    def transcribe_step(self, requests):
+        return self.outputs
+
+
 def _state():
     state = StreamingState()
     state.options = SimpleNamespace(enable_nmt=True, source_language="English", target_language="German")
@@ -232,3 +262,23 @@ def test_native_last_request_flushes_unpunctuated_translation_before_state_delet
     assert output.partial_translation == ""
     assert output.current_step_translation == "<unfinished ending>"
     assert pipeline.get_state(7) is None
+
+
+def test_native_run_records_only_finalized_translation_units_for_downstream_tts():
+    pipeline = _RunPipeline(
+        [
+            TranscribeStepOutput(
+                stream_id=0,
+                final_segments=[],
+                final_translation="Guten Morgen.",
+                partial_translation="Wie geht",
+                current_step_translation="Guten Morgen. Wie geht",
+            )
+        ]
+    )
+
+    output = pipeline.run(["input.wav"])
+
+    assert output[0]["translation"] == "Guten Morgen."
+    assert output[0]["translation_segments"] == [("Guten Morgen. Wie geht", 1.5)]
+    assert output[0]["final_translation_segments"] == [("Guten Morgen.", 1.5)]
