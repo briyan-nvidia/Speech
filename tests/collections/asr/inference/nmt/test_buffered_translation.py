@@ -95,7 +95,7 @@ class _RequestGenerator:
         return 1.5
 
     def __iter__(self):
-        yield [object()]
+        yield [SimpleNamespace(stream_id=0, is_last=True)]
 
 
 class _RunPipeline(_Pipeline):
@@ -282,3 +282,39 @@ def test_native_run_records_only_finalized_translation_units_for_downstream_tts(
     assert output[0]["translation"] == "Guten Morgen."
     assert output[0]["translation_segments"] == [("Guten Morgen. Wie geht", 1.5)]
     assert output[0]["final_translation_segments"] == [("Guten Morgen.", 1.5)]
+
+
+def test_native_run_emits_each_committed_translation_to_callback():
+    pipeline = _RunPipeline(
+        [
+            TranscribeStepOutput(
+                stream_id=0,
+                final_segments=[],
+                final_translation="Guten Morgen.",
+                current_step_translation="Guten Morgen.",
+            )
+        ]
+    )
+    emitted = []
+
+    pipeline.run(["input.wav"], committed_translation_callback=lambda *args: emitted.append(args))
+
+    assert emitted == [(0, "Guten Morgen.", 1.5, True, True)]
+
+
+def test_native_run_emits_lcp_commit_before_translation_boundary():
+    pipeline = _RunPipeline(
+        [
+            TranscribeStepOutput(
+                stream_id=0,
+                final_segments=[],
+                partial_translation="Guten Morgen, wie geht es Ihnen?",
+                current_step_translation="Guten Morgen",
+            )
+        ]
+    )
+    emitted = []
+
+    pipeline.run(["input.wav"], committed_translation_callback=lambda *args: emitted.append(args))
+
+    assert emitted == [(0, "Guten Morgen", 1.5, False, True)]

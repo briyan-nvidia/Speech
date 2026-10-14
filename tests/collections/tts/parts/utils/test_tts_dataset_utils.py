@@ -24,6 +24,7 @@ import nemo.collections.tts.parts.utils.tts_dataset_utils as tts_dataset_utils
 from nemo.collections.tts.modules.magpietts_modules import build_vocabs
 from nemo.collections.tts.parts.utils.tts_dataset_utils import (
     LanguageThresholds,
+    WhisperTranscriber,
     _get_sentence_separators_for_language,
     _sample_probability_range,
     _select_text_for_tts_input,
@@ -57,6 +58,56 @@ class _FakePhonemeTokenizer:
         self.seen_text.append(text)
         vocab = {"a": 1, "b": 2, "c": 3}
         return [vocab[char] for char in text if char in vocab]
+
+
+class _FakeWhisperProcessor:
+    def __call__(self, *args, **kwargs):
+        self.processor_kwargs = kwargs
+        return type(
+            "WhisperInputs",
+            (),
+            {"input_features": torch.ones(1, 2, dtype=torch.float16), "attention_mask": torch.ones(1, 2)},
+        )()
+
+    def get_decoder_prompt_ids(self, language, task):
+        return [[1, 2]]
+
+    def batch_decode(self, predicted_ids, skip_special_tokens):
+        return ["transcript"]
+
+
+class _FakeWhisperModel:
+    device = torch.device("cpu")
+    dtype = torch.float32
+
+    def to(self, device):
+        return self
+
+    def eval(self):
+        return self
+
+    def generate(self, input_features, **kwargs):
+        self.generated_features = input_features
+        self.generation_kwargs = kwargs
+        return torch.tensor([[1, 2]])
+
+
+@pytest.mark.run_only_on('CPU')
+@pytest.mark.unit
+def test_whisper_transcriber_matches_features_to_model_dtype_and_passes_attention_mask(monkeypatch):
+    processor = _FakeWhisperProcessor()
+    model = _FakeWhisperModel()
+    monkeypatch.setattr(tts_dataset_utils.WhisperProcessor, "from_pretrained", lambda model_name: processor)
+    monkeypatch.setattr(tts_dataset_utils.WhisperForConditionalGeneration, "from_pretrained", lambda model_name: model)
+    monkeypatch.setattr(tts_dataset_utils.librosa, "load", lambda path, sr: (np.ones(100), sr))
+    transcriber = WhisperTranscriber(device="cpu", model_name="fake-whisper")
+
+    transcripts = transcriber.transcribe([Path("audio.wav")], batch_size=1, language="de")
+
+    assert transcripts == ["transcript"]
+    assert model.generated_features.dtype == torch.float32
+    assert torch.equal(model.generation_kwargs["attention_mask"], torch.ones(1, 2))
+    assert processor.processor_kwargs["return_attention_mask"] is True
 
 
 class TestTTSDatasetUtils:

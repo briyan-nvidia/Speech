@@ -20,7 +20,7 @@ import os
 import re
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 import torch
 from omegaconf import DictConfig
@@ -855,19 +855,26 @@ class BasePipeline(PipelineInterface):
             )
         return lang_index
 
-    def _resolve_default_language_code(self) -> str:
+    def _resolve_default_language_code(self) -> str | None:
         """
         Pick the language used when a request does not specify one.
 
-        Prefers the model's automatic language-detection prompt when available, so that a
-        multilingual model does not silently transcribe every language as English.
+        Prefers a language the model itself declares, then the usual language-agnostic keys, so
+        that a multilingual model does not silently transcribe every language as English.
         Returns:
-            (str) "auto" when the model's prompt dictionary supports it, otherwise "en-US".
+            (str | None) A key of the model's prompt dictionary, or None when the model has no
+                prompts or defines none of the candidates, in which case the caller must supply a
+                language explicitly.
         """
         if not getattr(self, '_prompt_config', None):
-            return "en-US"
+            return None
+
+        declared = getattr(self.asr_model.asr_model, 'default_prompt_language', None)
+        if declared is not None:
+            return declared
+
         prompt_dict = self._prompt_config['prompt_dict']
-        return "auto" if "auto" in prompt_dict else "en-US"
+        return next((code for code in ("auto", "en-US") if code in prompt_dict), None)
 
     def _create_one_hot_prompts(self, indices: Tensor) -> Tensor:
         """
@@ -901,6 +908,7 @@ class BasePipeline(PipelineInterface):
         audio_filepaths: list[str],
         options: list[ASRRequestOptions] | None = None,
         progress_bar: ProgressBar | None = None,
+        committed_translation_callback: Callable[[int, str, float, bool, bool], None] | None = None,
     ) -> dict:
         """
         Orchestrates reading from audio_filepaths in a streaming manner,
@@ -909,6 +917,8 @@ class BasePipeline(PipelineInterface):
             audio_filepaths (list[str]): List of audio filepaths to transcribe.
             options (list[ASRRequestOptions] | None): List of RequestOptions for each stream.
             progress_bar (ProgressBar | None): Progress bar to show the progress. Default is None.
+            committed_translation_callback: Optional callback invoked synchronously with
+                ``(stream_id, committed_text_delta, source_elapsed_seconds, is_boundary, is_last)``.
         Returns:
             dict: A dictionary containing transcriptions and segments for each stream.
         """
@@ -931,6 +941,7 @@ class BasePipeline(PipelineInterface):
         self.open_session()
         for requests in request_generator:
             step_outputs = self.transcribe_step(requests)
+            request_by_stream_id = {request.stream_id: request for request in requests}
             for step_output in step_outputs:
                 stream_id = step_output.stream_id
                 if stream_id not in pipeline_output:
@@ -974,6 +985,14 @@ class BasePipeline(PipelineInterface):
                     step_translation = step_output.current_step_translation
                     delay = request_generator.get_elapsed_duration(stream_id)
                     pipeline_output[stream_id]["translation_segments"].append((step_translation, delay))
+                    if step_translation and committed_translation_callback is not None:
+                        committed_translation_callback(
+                            stream_id,
+                            step_translation,
+                            delay,
+                            bool(final_translation),
+                            request_by_stream_id[stream_id].is_last,
+                        )
                     if final_translation:
                         pipeline_output[stream_id]["final_translation_segments"].append((final_translation, delay))
 

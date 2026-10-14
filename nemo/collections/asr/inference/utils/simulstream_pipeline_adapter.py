@@ -310,7 +310,11 @@ class NeMoStreamingPipelineAdapter(SpeechProcessor):
             is_first=self.is_first_chunk,
             is_last=False,
             length=audio_length,
-            options=ASRRequestOptions(biasing_cfg=biasing_cfg) if self.is_first_chunk else None,
+            options=(
+                ASRRequestOptions(language_code=self.src_lang, biasing_cfg=biasing_cfg)
+                if self.is_first_chunk
+                else None
+            ),
         )
 
         # This internally handles: buffering -> encoding -> decoding -> translation

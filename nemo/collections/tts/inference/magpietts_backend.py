@@ -143,3 +143,61 @@ class MagpieTTSBackend:
         num_samples = int(audio_len[0].item())
         waveform = audio[0, :num_samples].float().detach().cpu().numpy()
         return SynthesisOutput(waveform, self.sample_rate, generation_time_seconds)
+
+    def warmup(self, text: str, language: str) -> None:
+        """Initialize language normalization and GPU kernels without changing session state."""
+        self.synthesize(text, language)
+        self.seed(self.config.seed)
+
+    def create_streaming_session(self, language: str, speaker: str | int | None = None) -> MagpieTTSStreamingSession:
+        """Create persistent Magpie state for one incrementally supplied utterance."""
+        return MagpieTTSStreamingSession(self, language, speaker)
+
+
+class MagpieTTSStreamingSession:
+    """Stateful text-chunk interface over Magpie's incremental generation API."""
+
+    def __init__(self, backend: MagpieTTSBackend, language: str, speaker: str | int | None = None):
+        language = language.strip().lower()
+        if language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"unsupported language {language!r}")
+        self.backend = backend
+        self.language = language
+        self.speaker_index = backend.speaker_index if speaker is None else parse_speaker(speaker)[1]
+        self.chunk_state = backend.model.create_chunk_state(batch_size=1)
+        self.is_first_chunk = True
+        self.closed = False
+
+    def synthesize(self, text: str, end_of_text: bool = False) -> SynthesisOutput:
+        """Synthesize one committed text increment and retain state for the next."""
+        if self.closed:
+            raise RuntimeError("streaming TTS session is closed")
+        text = text.strip()
+        if not text:
+            raise ValueError("text must not be empty")
+
+        self.backend._synchronize()
+        start = time.perf_counter()
+        with torch.inference_mode():
+            audio, audio_len = self.backend.model.do_tts_chunk(
+                text,
+                chunk_state=self.chunk_state,
+                language=self.language,
+                apply_TN=self.backend.config.apply_text_normalization,
+                use_cfg=self.backend.config.use_cfg,
+                speaker_index=self.speaker_index,
+                beginning_of_text=self.is_first_chunk,
+                end_of_text=end_of_text,
+            )
+        self.backend._synchronize()
+        generation_time_seconds = time.perf_counter() - start
+        self.is_first_chunk = False
+        if end_of_text:
+            self.closed = True
+        num_samples = int(audio_len[0].item())
+        waveform = audio[0, :num_samples].float().detach().cpu().numpy()
+        return SynthesisOutput(waveform, self.backend.sample_rate, generation_time_seconds)
+
+    def close(self) -> None:
+        """Prevent further input to this session."""
+        self.closed = True

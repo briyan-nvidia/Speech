@@ -97,6 +97,7 @@ nmt:
 # Text-to-Speech Configuration
 # ================================
 tts:
+  incremental: true                          # Emit buffered, temporally committed MT text during streaming
   model: nvidia/magpie_tts_multilingual_357m
   revision: v2607
   model_filename: magpie_tts_multilingual_357m.nemo
@@ -107,7 +108,16 @@ tts:
   cfg_scale: 2.5
   apply_text_normalization: true
   seed: 42
+  warmup_text: null                            # Optional target-language text for service warm-up before timing
+  chunking_policy: queue_aware                 # Start with a phrase, then prefer sentences while playback is buffered
+  min_chunk_units: 6                           # Minimum committed words (or CJK characters) in a fallback phrase
+  max_chunk_units: 12                          # Force a phrase by this size when playback needs more audio
+  target_buffer_seconds: 2.0                   # Prefer longer chunks while at least this much audio remains queued
   inter_segment_silence_ms: 0
+  rate_control: none                           # One of: none, fixed, adaptive, source_paced
+  playback_rate: 1.0                           # Pitch-preserving rate used in fixed mode
+  maximum_playback_rate: 1.4                   # Maximum rate used in adaptive and source_paced modes
+  target_lag_seconds: 5.5                      # Adaptive deadline relative to the source commit time
   output_dir: null                            # Defaults to <output manifest directory>/tts_audio
 
 
@@ -165,7 +175,7 @@ output_filename: null                         # Path to output transcription JSO
 output_dir: null                              # Directory to save time-aligned output
 enable_itn: false                             # Whether to apply inverse text normalization
 enable_nmt: false                             # Whether to apply neural machine translation
-enable_tts: false                             # Synthesize finalized translations with MagpieTTS
+enable_tts: false                             # Synthesize translations with MagpieTTS
 asr_output_granularity: segment               # Output granularity: word or segment
 cache_dir: null                               # Directory to store cache (e.g., .far files)
 lang: null                                    # Language code for ASR model

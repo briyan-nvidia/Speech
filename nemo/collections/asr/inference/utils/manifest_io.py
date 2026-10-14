@@ -176,12 +176,30 @@ def dump_output(
                 "json_filepath": json_filepath,
             }
             for key in (
+                "translation_segments",
                 "final_translation_segments",
                 "speech_filepath",
                 "tts_segments",
                 "tts_sample_rate",
                 "tts_audio_duration_seconds",
                 "tts_generation_time_seconds",
+                "tts_rate_control_time_seconds",
+                "tts_raw_audio_duration_seconds",
+                "tts_time_to_first_audio_seconds",
+                "tts_wall_time_to_first_audio_seconds",
+                "tts_timing_basis",
+                "tts_incremental",
+                "tts_min_chunk_units",
+                "tts_max_chunk_units",
+                "tts_chunking_policy",
+                "tts_target_buffer_seconds",
+                "tts_rate_control",
+                "tts_playback_rate",
+                "tts_maximum_playback_rate",
+                "tts_target_lag_seconds",
+                "tts_estimated_source_seconds",
+                "tts_raw_to_source_duration_ratio",
+                "tts_played_to_source_duration_ratio",
             ):
                 if key in data:
                     item[key] = data[key]

@@ -1357,16 +1357,51 @@ class WhisperTranscriber(Transcriber):
         else:
             forced_decoder_ids = None
 
-        all_transcriptions = []
-        for start in range(0, len(audio_paths), batch_size):
-            batch_paths = audio_paths[start : start + batch_size]
-            speech_arrays = [librosa.load(p, sr=self.input_sample_rate)[0] for p in batch_paths]
+        speech_arrays = [librosa.load(path, sr=self.input_sample_rate)[0] for path in audio_paths]
+        max_shortform_samples = 30 * self.input_sample_rate
+        shortform_indices = [
+            index for index, speech in enumerate(speech_arrays) if len(speech) <= max_shortform_samples
+        ]
+        longform_indices = [index for index, speech in enumerate(speech_arrays) if len(speech) > max_shortform_samples]
+        all_transcriptions = [""] * len(audio_paths)
+
+        for start in range(0, len(shortform_indices), batch_size):
+            indices = shortform_indices[start : start + batch_size]
             inputs = self.processor(
-                speech_arrays, sampling_rate=self.input_sample_rate, return_tensors="pt", padding=True
-            ).input_features
-            inputs = inputs.half().to(self.model.device)
+                [speech_arrays[index] for index in indices],
+                sampling_rate=self.input_sample_rate,
+                return_tensors="pt",
+                padding=True,
+                return_attention_mask=True,
+            )
+            input_features = inputs.input_features.to(device=self.model.device, dtype=self.model.dtype)
+            attention_mask = inputs.attention_mask.to(self.model.device)
             with torch.inference_mode():
-                predicted_ids = self.model.generate(inputs, forced_decoder_ids=forced_decoder_ids)
+                predicted_ids = self.model.generate(
+                    input_features, attention_mask=attention_mask, forced_decoder_ids=forced_decoder_ids
+                )
             transcriptions = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)
-            all_transcriptions.extend(transcriptions)
+            for index, transcription in zip(indices, transcriptions):
+                all_transcriptions[index] = transcription
+
+        for index in longform_indices:
+            inputs = self.processor(
+                speech_arrays[index],
+                sampling_rate=self.input_sample_rate,
+                return_tensors="pt",
+                truncation=False,
+                padding="longest",
+                return_attention_mask=True,
+            )
+            input_features = inputs.input_features.to(device=self.model.device, dtype=self.model.dtype)
+            attention_mask = inputs.attention_mask.to(self.model.device)
+            with torch.inference_mode():
+                predicted_ids = self.model.generate(
+                    input_features,
+                    attention_mask=attention_mask,
+                    language=language,
+                    task="transcribe",
+                    return_timestamps=True,
+                )
+            all_transcriptions[index] = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
         return all_transcriptions

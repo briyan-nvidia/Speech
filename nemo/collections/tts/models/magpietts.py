@@ -3798,30 +3798,57 @@ class MagpieTTSModel(ModelPT):
             ...     "Hello!", speaker_index=2
             ... )
         """
+        return self.do_tts_chunk(
+            transcript=transcript,
+            chunk_state=self.create_chunk_state(batch_size=1),
+            language=language,
+            apply_TN=apply_TN,
+            use_cfg=use_cfg,
+            speaker_index=speaker_index,
+            beginning_of_text=True,
+            end_of_text=True,
+        )
+
+    def do_tts_chunk(
+        self,
+        transcript: str,
+        chunk_state: ChunkState,
+        language: str = "en",
+        apply_TN: bool = False,
+        use_cfg: bool = True,
+        speaker_index: Optional[int] = None,
+        beginning_of_text: bool = False,
+        end_of_text: bool = False,
+    ) -> tuple:
+        """Generate waveform for one text increment while preserving generation state.
+
+        Consecutive calls for the same utterance must reuse ``chunk_state``. Set
+        ``beginning_of_text`` only on the first call. ``end_of_text`` controls the
+        final supplied increment; intermediate increments are generated without an
+        utterance-final EOS requirement.
+        """
         if not self.has_baked_context_embedding:
             raise ValueError(
                 "Model does not have a baked context embedding. Please use a checkpoint with a baked context embedding."
             )
+        if not transcript.strip():
+            raise ValueError("transcript must not be empty")
+        if chunk_state.batch_size != 1:
+            raise ValueError("do_tts_chunk currently supports batch_size=1")
+
         # Workaround for bug in Ja normalizer, Ja normalizer does not work well with spaces.
         if language == "ja":
             transcript = re.sub(r'\s+', '', transcript)
-        # Apply text normalization if requested
         normalized_text = (
             self._get_normalized_text(transcript=transcript, language=language) if apply_TN else transcript
         )
-
-        # Determine tokenizer name based on language using centralized mapping
         available_tokenizers = list(self.tokenizer.tokenizers.keys())
-        available_mapping = self.cfg.get("language_to_tokenizer_mapping", None)
         tokenizer_name = get_tokenizer_for_language(
-            language, available_tokenizers, language_tokenizer_map=available_mapping
+            language,
+            available_tokenizers,
+            language_tokenizer_map=self.cfg.get("language_to_tokenizer_mapping", None),
         )
         logging.info(f"Using tokenizer '{tokenizer_name}' for language '{language}'")
-
-        # Unified inference path: chunk_text_for_inference automatically decides
-        # whether to split based on language-specific thresholds
-        # - Short text (below threshold): returns single chunk
-        # - Long text (above threshold): returns multiple sentence chunks
         chunked_tokens, chunked_tokens_len, _ = chunk_text_for_inference(
             text=normalized_text,
             language=language,
@@ -3830,42 +3857,30 @@ class MagpieTTSModel(ModelPT):
             eos_token_id=self.eos_id,
         )
 
-        num_chunks = len(chunked_tokens)
-
+        all_codes = []
         with torch.no_grad():
-            chunk_state = self.create_chunk_state(batch_size=1)
-            all_codes = []
-
             for chunk_idx, (tokens, tokens_len) in enumerate(zip(chunked_tokens, chunked_tokens_len)):
-                batch = {
-                    'text': tokens.unsqueeze(0).to(self.device),
-                    'text_lens': torch.tensor([tokens_len], device=self.device, dtype=torch.long),
-                    'speaker_indices': speaker_index,
-                }
-                end_of_text = [chunk_idx == num_chunks - 1]
-                beginning_of_text = chunk_idx == 0
-
                 output = self.generate_speech(
-                    batch,
+                    {
+                        'text': tokens.unsqueeze(0).to(self.device),
+                        'text_lens': torch.tensor([tokens_len], device=self.device, dtype=torch.long),
+                        'speaker_indices': speaker_index,
+                    },
                     chunk_state=chunk_state,
-                    end_of_text=end_of_text,
-                    beginning_of_text=beginning_of_text,
+                    end_of_text=[end_of_text and chunk_idx == len(chunked_tokens) - 1],
+                    beginning_of_text=beginning_of_text and chunk_idx == 0,
                     use_cfg=use_cfg,
                     use_local_transformer_for_inference=self.local_transformer_type != LocalTransformerType.NO_LT,
                 )
                 if output.predicted_codes_lens[0] > 0:
                     all_codes.append(output.predicted_codes[0, :, : output.predicted_codes_lens[0]])
 
-            # Concatenate and convert to audio
-            if len(all_codes) > 0:
-                concatenated_codes = torch.cat(all_codes, dim=1).unsqueeze(0)
-                codes_lens = torch.tensor([concatenated_codes.shape[2]], device=self.device, dtype=torch.long)
-                predicted_audio, predicted_audio_lens, _ = self._codec_helper.codes_to_audio(
-                    concatenated_codes, codes_lens
-                )
-                return predicted_audio, predicted_audio_lens
-            else:
-                return torch.zeros(1, 0, device=self.device), torch.zeros(1, device=self.device, dtype=torch.long)
+        if not all_codes:
+            return torch.zeros(1, 0, device=self.device), torch.zeros(1, device=self.device, dtype=torch.long)
+        concatenated_codes = torch.cat(all_codes, dim=1).unsqueeze(0)
+        codes_lens = torch.tensor([concatenated_codes.shape[2]], device=self.device, dtype=torch.long)
+        predicted_audio, predicted_audio_lens, _ = self._codec_helper.codes_to_audio(concatenated_codes, codes_lens)
+        return predicted_audio, predicted_audio_lens
 
     @classmethod
     def list_available_models(cls) -> List[PretrainedModelInfo]:

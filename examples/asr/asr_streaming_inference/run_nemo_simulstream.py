@@ -41,6 +41,7 @@ Any additional `key=value` arguments are applied as NeMo config overrides (e.g. 
 """
 
 import argparse
+import os
 import shutil
 import subprocess
 import tempfile
@@ -229,6 +230,7 @@ def main():
             if not audio_paths:
                 raise RuntimeError(f"No audio files found in manifest: {args.manifest}")
             _, temp_wav_list = tempfile.mkstemp(suffix='.txt', prefix='wav_list_')
+            audio_paths = [os.path.relpath(path, Path(temp_wav_list).parent) for path in audio_paths]
             with open(temp_wav_list, 'w') as f:
                 for path in audio_paths:
                     f.write(f"{path}\n")

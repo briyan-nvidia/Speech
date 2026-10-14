@@ -77,27 +77,10 @@ def synthesize_pipeline_output(output: dict, cfg) -> dict:
     if not cfg.enable_nmt:
         raise ValueError("enable_tts requires enable_nmt=true")
 
-    from nemo.collections.tts.inference import (
-        MagpieTTSBackend,
-        MagpieTTSConfig,
-        resolve_language,
-        synthesize_finalized_translations,
-    )
+    from nemo.collections.tts.inference import resolve_language, synthesize_finalized_translations
 
     tts_cfg = cfg.tts
-    backend = MagpieTTSBackend(
-        MagpieTTSConfig(
-            model=tts_cfg.model,
-            revision=tts_cfg.revision,
-            model_filename=tts_cfg.model_filename,
-            device=tts_cfg.device,
-            speaker=tts_cfg.speaker,
-            use_cfg=tts_cfg.use_cfg,
-            cfg_scale=tts_cfg.cfg_scale,
-            apply_text_normalization=tts_cfg.apply_text_normalization,
-            seed=tts_cfg.seed,
-        )
-    )
+    backend = _build_tts_backend(tts_cfg)
     language = resolve_language(tts_cfg.language, cfg.nmt.target_language)
     output_dir = tts_cfg.output_dir or str(Path(cfg.output_filename).resolve().parent / "tts_audio")
     output = synthesize_finalized_translations(
@@ -139,6 +122,32 @@ def main(cfg):
 
     # Build the pipeline
     pipeline = PipelineBuilder.build_pipeline(cfg)
+    incremental_tts = None
+    if cfg.get("enable_tts", False) and cfg.tts.get("incremental", False):
+        if not cfg.enable_nmt:
+            raise ValueError("enable_tts requires enable_nmt=true")
+        from nemo.collections.tts.inference import IncrementalSynthesisManager, resolve_language
+
+        tts_output_dir = cfg.tts.output_dir or str(Path(cfg.output_filename).resolve().parent / "tts_audio")
+        tts_language = resolve_language(cfg.tts.language, cfg.nmt.target_language)
+        tts_backend = _build_tts_backend(cfg.tts)
+        if cfg.tts.get("warmup_text"):
+            logging.info("Warming MagpieTTS for language %s", tts_language)
+            tts_backend.warmup(cfg.tts.warmup_text, tts_language)
+        incremental_tts = IncrementalSynthesisManager(
+            backend=tts_backend,
+            output_dir=tts_output_dir,
+            language=tts_language,
+            min_chunk_units=cfg.tts.min_chunk_units,
+            max_chunk_units=cfg.tts.max_chunk_units,
+            chunking_policy=cfg.tts.chunking_policy,
+            target_buffer_seconds=cfg.tts.target_buffer_seconds,
+            inter_segment_silence_ms=cfg.tts.inter_segment_silence_ms,
+            rate_control=cfg.tts.rate_control,
+            playback_rate=cfg.tts.playback_rate,
+            maximum_playback_rate=cfg.tts.maximum_playback_rate,
+            target_lag_seconds=cfg.tts.target_lag_seconds,
+        )
 
     # Warmup and run the pipeline
     timer = SimpleTimer()
@@ -151,7 +160,13 @@ def main(cfg):
         progress_bar = TQDMProgressBar()
         timer.reset()
         timer.start(device=pipeline.device)
-        output = pipeline.run(audio_filepaths, progress_bar=progress_bar, options=options)
+        capture_incremental_tts = incremental_tts is not None and run_step == cfg.warmup_steps + cfg.run_steps - 1
+        output = pipeline.run(
+            audio_filepaths,
+            progress_bar=progress_bar,
+            options=options,
+            committed_translation_callback=incremental_tts.accept_committed if capture_incremental_tts else None,
+        )
         timer.stop(pipeline.device)
         if run_step >= cfg.warmup_steps:
             measurements.append(timer.total_sec())
@@ -166,9 +181,11 @@ def main(cfg):
     rtfx = data_dur / exec_dur if exec_dur > 0 else float('inf')
     logging.info(f"RTFx: {rtfx:.2f} ({data_dur:.2f}s / {exec_dur:.2f}s)")
 
-    # Synthesize only translations finalized by the MT policy. This is intentionally
-    # outside the ASR/MT timer so speech generation can be measured independently.
-    if cfg.get("enable_tts", False):
+    # Incremental generation runs synchronously at an MT commitment and is therefore
+    # included in the pipeline timer. Stateless generation remains a post-processing step.
+    if incremental_tts is not None:
+        output = incremental_tts.finalize(output)
+    elif cfg.get("enable_tts", False):
         output = synthesize_pipeline_output(output, cfg)
 
     # Calculate ASR LAAL
@@ -193,6 +210,25 @@ def main(cfg):
     # Evaluate the pipeline
     evaluate_pipeline(cfg.output_filename, cfg)
     logging.info("Done!")
+
+
+def _build_tts_backend(tts_cfg):
+    """Build the shared Magpie backend without importing TTS for ASR-only runs."""
+    from nemo.collections.tts.inference import MagpieTTSBackend, MagpieTTSConfig
+
+    return MagpieTTSBackend(
+        MagpieTTSConfig(
+            model=tts_cfg.model,
+            revision=tts_cfg.revision,
+            model_filename=tts_cfg.model_filename,
+            device=tts_cfg.device,
+            speaker=tts_cfg.speaker,
+            use_cfg=tts_cfg.use_cfg,
+            cfg_scale=tts_cfg.cfg_scale,
+            apply_text_normalization=tts_cfg.apply_text_normalization,
+            seed=tts_cfg.seed,
+        )
+    )
 
 
 if __name__ == "__main__":
